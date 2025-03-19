@@ -1,0 +1,75 @@
+from fastapi import FastAPI, UploadFile, File
+import uvicorn
+import os
+import librosa
+import numpy as np
+import soundfile as sf
+import tensorflow as tf
+import ddsp.training
+from pathlib import Path
+
+# Initialisation de l'application FastAPI
+app = FastAPI()
+
+# Dossiers pour stocker les fichiers
+UPLOAD_FOLDER = "uploads"
+PROCESSED_FOLDER = "processed"
+MODEL_FOLDER = "models"
+SAMPLE_RATE = 44100
+
+Path(UPLOAD_FOLDER).mkdir(parents=True, exist_ok=True)
+Path(PROCESSED_FOLDER).mkdir(parents=True, exist_ok=True)
+Path(MODEL_FOLDER).mkdir(parents=True, exist_ok=True)
+
+@app.get("/")
+def home():
+    return {"message": "Bienvenue sur l'API de Remix AI"}
+
+@app.post("/upload/")
+async def upload_audio(file: UploadFile = File(...)):
+    """Upload d'un fichier audio"""
+    file_location = os.path.join(UPLOAD_FOLDER, file.filename)
+    with open(file_location, "wb") as f:
+        f.write(file.file.read())
+    return {"filename": file.filename, "message": "Fichier uploadé avec succès"}
+
+def preprocess_audio(file_path, output_folder):
+    """ Convertit le fichier en format standard et extrait les features """
+    os.makedirs(output_folder, exist_ok=True)
+    y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
+    output_path = os.path.join(output_folder, os.path.basename(file_path))
+    sf.write(output_path, y, SAMPLE_RATE)
+    spectrogram = librosa.feature.melspectrogram(y=y, sr=sr)
+    np.save(output_path.replace(".wav", ".npy"), spectrogram)
+    return output_path
+
+def apply_ddsp_model(input_audio, model_path):
+    """ Charge et applique un modèle DDSP sur un fichier audio """
+    model = ddsp.training.models.Autoencoder()
+    model.load_weights(model_path)
+    
+    y, sr = librosa.load(input_audio, sr=SAMPLE_RATE, mono=True)
+    # TODO: Passer le signal à travers le modèle DDSP
+    output_audio = input_audio.replace("uploads", "processed").replace(".wav", "_remixed.wav")
+    sf.write(output_audio, y, SAMPLE_RATE)  # Fausse sortie pour le moment
+    return output_audio
+
+@app.post("/remix/")
+async def remix_audio(style: str, file: UploadFile = File(...)):
+    """Endpoint pour remixer un fichier audio avec un style donné"""
+    file_location = os.path.join(UPLOAD_FOLDER, file.filename)
+    with open(file_location, "wb") as f:
+        f.write(file.file.read())
+    
+    processed_audio = preprocess_audio(file_location, PROCESSED_FOLDER)
+    model_path = os.path.join(MODEL_FOLDER, f"ddsp_{style}.ckpt")
+    
+    if not os.path.exists(model_path):
+        return {"error": "Modèle non disponible pour ce style"}
+    
+    remixed_audio = apply_ddsp_model(processed_audio, model_path)
+    
+    return {"message": "Remix terminé!", "remixed_file": remixed_audio}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
